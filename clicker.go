@@ -64,6 +64,19 @@ func init() {
 	fmt.Println("Connected to MongoDB Atlas!")
 }
 
+type UserStats struct {
+    AuthDate      *int      `json:"auth_date" bson:"auth_date"`
+    UserID        *int     `json:"id" bson:"userId"`
+    IsPremium     *bool    `json:"is_premium" bson:"is_premium"`
+    LanguageCode  *string  `json:"language_code" bson:"language_code"`
+    UserName      *string  `json:"username" bson:"username"`
+    Count         *int     `json:"count" bson:"count"`
+    Address       *string  `json:"address" bson:"address"`
+    Gems          *int     `json:"gems" bson:"gems"`
+    Multiplier    *int     `json:"multiplier" bson:"multiplier"`
+    TonBalance    *float64 `json:"tonBalance" bson:"tonBalance"`
+}
+
 type VerifyRequest struct {
 	Hash string `json:"hash"`
 	Data string `json:"data"`
@@ -97,6 +110,8 @@ func main() {
 	}
 }
 
+
+
 func enableCors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -112,52 +127,64 @@ func enableCors(next http.Handler) http.Handler {
 	})
 }
 
-func updateFieldHandler(w http.ResponseWriter, r *http.Request) {
-	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+// Extracted logic from updateFieldHandler
+func updateCount(ctx context.Context, userId int, count int) (int, error) {
+    filter := bson.M{"userId": userId}
+    var currentDoc struct {
+        Count int `bson:"count"`
+    }
+    err := clicksColl.FindOne(ctx, filter).Decode(&currentDoc)
+    if err != nil {
+        return 0, err // Simplified error handling for demonstration
+    }
 
-	filter := bson.M{"userId": req.UserID, "userName": req.UserName}
-	var currentDoc struct {
-		Count int `bson:"count"`
-	}
-	err := clicksColl.FindOne(ctx, filter).Decode(&currentDoc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			http.Error(w, "No document found with the provided userId and userName", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+    if count <= currentDoc.Count {
+        return currentDoc.Count, nil
+    }
 
-	if req.Count <= currentDoc.Count {
-		fmt.Fprint(w, currentDoc.Count)
-		return
-	}
+    update := bson.M{"$set": bson.M{
+        "count": count,
+    }}
 
-	update := bson.M{"$set": bson.M{
-		"userId":   req.UserID,
-		"userName": req.UserName,
-		"count":    req.Count,
-	}}
+    _, err = clicksColl.UpdateOne(ctx, filter, update)
+    if err != nil {
+        return 0, err
+    }
 
-	_, err = clicksColl.UpdateOne(ctx, filter, update)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	fmt.Fprint(w, req.Count)
+    return count, nil
 }
 
-func createDocument(userId int, userName string, count int) error {
+func updateFieldHandler(w http.ResponseWriter, r *http.Request) {
+    var req UpdateRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+	updatedCount, err := updateCount(ctx, req.UserID, req.Count)
+    if err != nil {
+        if err == mongo.ErrNoDocuments {
+            http.Error(w, "No document found with the provided userId and userName", http.StatusNotFound)
+        } else {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+        }
+        return
+    }
+
+    fmt.Fprint(w, updatedCount)
+}
+
+func createDocument(UserStats UserStats) error {
 	document := bson.M{
-		"userId":   userId,
-		"userName": userName,
-		"count":    count,
+		"userId":   UserStats.UserID,
+		"userName": UserStats.UserName,
+		"count":    UserStats.Count,
+        "is_premium": UserStats.IsPremium,
+        "language_code": UserStats.LanguageCode,
+        "address": UserStats.Address,
+        "gems": UserStats.Gems,
+        "multiplier": UserStats.Multiplier,
+        "tonBalance": UserStats.TonBalance,
 	}
 
 	_, err := clicksColl.InsertOne(ctx, document)
@@ -171,11 +198,7 @@ func createDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := createDocument(req.UserID, req.UserName, req.Count)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// Create the document in the database
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -266,7 +289,12 @@ func dbInitHandler(w http.ResponseWriter, r *http.Request) {
 	err := clicksColl.FindOne(ctx, filter).Decode(&result)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			err = createDocument(req.UserID, req.UserName, req.Count)
+			userStats := UserStats{
+                UserID:   &req.UserID,
+                UserName: &req.UserName,
+                Count:    &req.Count,
+            }
+            err = createDocument(userStats)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -341,8 +369,12 @@ func verifySignatureHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Prepare the response map
+    var user UserStats
     responseMap := make(map[string]interface{})
     for key := range values {
+        if key == "chat_instance" || key == "chat_type" {
+            continue
+        }
         value := values.Get(key)
         if key == "auth_date" {
             intValue, err := strconv.Atoi(value)
@@ -351,6 +383,7 @@ func verifySignatureHandler(w http.ResponseWriter, r *http.Request) {
                 return
             }
             responseMap[key] = intValue
+            user.AuthDate = &intValue
         } else {
             responseMap[key] = value
         }
@@ -358,23 +391,26 @@ func verifySignatureHandler(w http.ResponseWriter, r *http.Request) {
 
     // Handle the nested user JSON
     if userJSON, ok := responseMap["user"].(string); ok {
-        var user map[string]interface{}
-        err := json.Unmarshal([]byte(userJSON), &user)
-        if err != nil {
+        if err := json.Unmarshal([]byte(userJSON), &user); err != nil {
             http.Error(w, "Error parsing user JSON", http.StatusInternalServerError)
             return
         }
-        responseMap["user"] = user
     }
-
-    // Convert the response map to JSON
-    responseData, err := json.Marshal(responseMap)
+    var count int
+    count, err = updateCount(ctx, *user.UserID, 1)
     if err != nil {
-        http.Error(w, "Error generating JSON response", http.StatusInternalServerError)
+        http.Error(w, "Error updating count", http.StatusInternalServerError)
+        return
+    }
+    user.Count = &count
+
+    jsonUser, err := json.Marshal(user)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
 
     // Set the response header to application/json
     w.Header().Set("Content-Type", "application/json")
-    w.Write(responseData)
+    w.Write(jsonUser)
 }
