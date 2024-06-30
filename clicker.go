@@ -217,7 +217,7 @@ func updateAddress(ctx context.Context, userId int, address string) (int, error)
         // If a matching NFT is found, set multiplier to 2 along with updating the address
         update := bson.M{"$set": bson.M{
             "address": address,
-            "multiplier": 2,
+            "multiplier": 5,
         }}
         _, err = clicksColl.UpdateOne(ctx, filter, update)
         if err != nil {
@@ -228,7 +228,7 @@ func updateAddress(ctx context.Context, userId int, address string) (int, error)
         // If no matching NFT is found, only update the address
         update := bson.M{"$set": bson.M{
             "address": address,
-            "multiplier": 1,
+            "multiplier": 2,
         }}
         _, err = clicksColl.UpdateOne(ctx, filter, update)
         if err != nil {
